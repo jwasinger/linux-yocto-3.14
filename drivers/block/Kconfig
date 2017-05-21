@@ -266,6 +266,15 @@ config BLK_DEV_LOOP_MIN_COUNT
 	  is used, it can be set to 0, since needed loop devices can be
 	  dynamically allocated with the /dev/loop-control interface.
 
+config RAM_DISK
+	tristate "CS444-Group-14-05 Ram Disk"
+	default m
+	depends on BLK_DEV_CRYPTOLOOP
+	---help---
+	  The RAM Disk device driver allocates a chunk of memory and 
+	  presents it as a block device. Includes encryption from the CryptoAPI
+	  which allows the device to encrypt/decrypt data as it is written/read.
+
 config BLK_DEV_CRYPTOLOOP
 	tristate "Cryptoloop Support"
 	select CRYPTO
