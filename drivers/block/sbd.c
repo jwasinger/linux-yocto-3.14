@@ -2,6 +2,7 @@
 #include <linux/modulparam.h>
 #include <init.h>
 
+#include <linux/sched.c>
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/errno.h>
@@ -26,6 +27,46 @@ struct sbull_dev {
 	struct gendisk *gd; /* The gendisk structure */
 	struct timer_list timer; /* For simulated media changes */
 };
+
+// implements the actual data transfer
+static void sbull_transfer(struct sbull_dev *dev, unsigned long sector,
+		unsigned long nsect, char *buffer, int write) {
+	unsigned long offset = sector*KERNEL_SECTOR_SIZE;
+	unsigned long nbytes = nsect*KERNEL_SECTOR_SIZE;
+	if ((offset + nbytes) > dev->size) {
+		printk (KERN_NOTICE "Beyond-end write (%ld %ld)\n", offset, nbytes);
+		return;
+	}
+	if (write)
+		memcpy(dev->data + offset, buffer, nbytes);
+	else
+		memcpy(buffer, dev->data + offset, nbytes);
+}
+
+// meant to be an example of the simplest possible request method
+static void sbull_request(request_queue_t *q)
+{
+	// represents a block I/O request for us to execute
+	struct request *req;
+	// obtain the first incomplete request on the queue
+	// In this simple mode of operation, requests are taken off the queue
+	// only when they are complete.
+	while ((req = elv_next_request(q)) != NULL) {
+		struct sbull_dev *dev = req->rq_disk->private_data;
+		// If a request is not a filesystem request,
+		if (! blk_fs_request(req)) {
+			printk (KERN_NOTICE "Skip non-fs request\n");
+			// pass to end_request with 0 to indicate that
+			// we did not successfully complete the request
+			end_request(req, 0);
+			continue;
+		}
+		// Otherwise, we call sbull_transfer to actually move the data
+		sbull_transfer(dev, req->sector, req->current_nr_sectors,
+				req->buffer, rq_data_dir(req));
+		end_request(req, 1);
+	}
+}
 
 static int sbull_open(struct inode *inode, struct file *filp) {
 	// the field i_bdev->bd_disk contains a pointer to the associated gendisk
@@ -82,6 +123,7 @@ int sbull_revalidate(struct gendisk *gd) {
 	return 0;
 }
 
+// a request for the device’s geometry, to perform device control functions
 int sbull_ioctl (struct inode *inode, struct file *filp,
 		unsigned int cmd, unsigned long arg)
 {
@@ -122,7 +164,7 @@ static void init_device(struct sbull_dev *dev) {
 	// allocation of the request queue
 	dev->queue = blk_init_queue(sbull_request, &dev->lock);
 	if (dev->queue == NULL) {
-		goto free_data;
+		goto out_vfree;
 	}
 
 	// inform the kernel of the sector size your device supports
@@ -145,9 +187,42 @@ static void init_device(struct sbull_dev *dev) {
 	add_disk(dev->gd);
 	return;
 
-	free_data:
-		if (dev->data) {
-			vfree(dev->data);
-		}
+out_vfree:
+	if (dev->data) {
+		vfree(dev->data);
+	}
+	return -ENOMEM;
 }
 
+static int __init sbull_init(void) {
+	int err;
+
+	sbull_major = register_blkdev(sbull_major, "sbd");
+	if (sbull_major <= 0) {
+		printk(KERN_WARNING "sbd: unable to get major num\n");
+		return -EBUSY;
+	}
+
+	return 0;
+
+out_unregister:
+	unregister_blkdev(sbull_major, "sbd");
+	return -ENOMEM;
+
+}
+
+static void __exit sbull_exit(void) {
+	del_gendisk(dev->gd);
+	put_disk(dev->gd);
+	unregister_blkdev(sbull_major, "sbd");
+	blk_cleanup_queue(dev->queue);
+	vfree(dev->data);
+
+}
+
+module_init(sbull_init);
+module_exit(sbull_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("CS444 Group 14-05");
+MODULE_DESCRIPTION("RAM Disk driver that allocates memory chunk and presents it as block device.");
