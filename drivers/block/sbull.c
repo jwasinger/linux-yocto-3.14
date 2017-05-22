@@ -278,7 +278,7 @@ static int __init sbull_init(void) {
 
 	sbull_major = register_blkdev(sbull_major, "sbull");
 	if (sbull_major <= 0) {
-		printk(KERN_WARNING "sbd: unable to get major num\n");
+		printk(KERN_WARNING "sbull: unable to get major num\n");
 		return -EBUSY;
 	}
 
