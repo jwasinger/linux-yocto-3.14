@@ -225,8 +225,8 @@ static struct block_device_operations sbull_ops = {
 	.owner				= THIS_MODULE,
 	.open				= sbull_open,
 	.release			= sbull_release,
-	.media_changed		= sbull_media_changed,
-	.revalidate_disk	= sbull_revalidate,
+	.media_changed			= sbull_media_changed,
+	.revalidate_disk		= sbull_revalidate,
 	.ioctl				= sbull_ioctl
 };
 
