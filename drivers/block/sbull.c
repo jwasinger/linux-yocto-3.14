@@ -13,6 +13,16 @@
 #include <linux/hdreg.h>
 #include <linux/crypto.h>
 
+static int sbull_major = 0;
+module_param(sbull_major, int, 0);
+static int hardsect_size = 512;
+module_param(hardsect_size, int, 0);
+// drive size
+static int nsectors = 1024;
+module_param(nsectors, int, 0);
+// number of RAM disks
+static int ndevices = 4;
+module_param(ndevices, int, 0);
 
 #define KERNEL_SECTOR_SIZE 512
 
@@ -27,6 +37,7 @@ struct sbull_dev {
 	struct gendisk *gd; /* The gendisk structure */
 	struct timer_list timer; /* For simulated media changes */
 };
+static struct sbull_dev *Devices = NULL;
 
 // implements the actual data transfer
 static void sbull_transfer(struct sbull_dev *dev, unsigned long sector,
@@ -66,6 +77,65 @@ static void sbull_request(request_queue_t *q)
 				req->buffer, rq_data_dir(req));
 		end_request(req, 1);
 	}
+}
+
+// transfer a single BIO
+static int sbull_xfer_bio(struct sbull_dev *dev, struct bio *bio)
+{
+	int i;
+	struct bio_vec *bvec;
+	sector_t sector = bio->bi_sector;
+	/* Do each segment independently. */
+	bio_for_each_segment(bvec, bio, i) {
+		char *buffer = __bio_kmap_atomic(bio, i, KM_USER0);
+		sbull_transfer(dev, sector, bio_cur_sectors(bio),
+				buffer, bio_data_dir(bio) = = WRITE);
+		sector += bio_cur_sectors(bio);
+		__bio_kunmap_atomic(bio, KM_USER0);
+	}
+	return 0; /* Always "succeed" */
+}
+
+// transfer a full request
+static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
+{
+	struct bio *bio;
+	int nsect = 0;
+	rq_for_each_bio(bio, req) {
+		sbull_xfer_bio(dev, bio);
+		nsect += bio->bi_size/KERNEL_SECTOR_SIZE;
+	}
+	return nsect;
+}
+
+// registered bio-aware function if the sbull driver is loaded with the request_mode parameter set to 1
+static void sbull_full_request(request_queue_t *q)
+{
+	struct request *req;
+	int sectors_xferred;
+	struct sbull_dev *dev = q->queuedata;
+	while ((req = elv_next_request(q)) != NULL) {
+		if (! blk_fs_request(req)) {
+			printk (KERN_NOTICE "Skip non-fs request\n");
+			end_request(req, 0);
+			continue;
+		}
+		sectors_xferred = sbull_xfer_request(dev, req);
+		if (! end_that_request_first(req, 1, sectors_xferred)) {
+			blkdev_dequeue_request(req);
+			end_that_request_last(req);
+		}
+	}
+}
+
+// operates with this function if sbull is loaded with request_mode=2
+static int sbull_make_request(request_queue_t *q, struct bio *bio)
+{
+	struct sbull_dev *dev = q->queuedata;
+	int status;
+	status = sbull_xfer_bio(dev, bio);
+	bio_endio(bio, bio->bi_size, status);
+	return 0;
 }
 
 static int sbull_open(struct inode *inode, struct file *filp) {
@@ -150,6 +220,16 @@ int sbull_ioctl (struct inode *inode, struct file *filp,
 	return -ENOTTY; /* unknown command */
 }
 
+// device operations structure
+static struct block_device_operations sbull_ops = {
+	.owner				= THIS_MODULE,
+	.open				= sbull_open,
+	.release			= sbull_release,
+	.media_changed		= sbull_media_changed,
+	.revalidate_disk	= sbull_revalidate,
+	.ioctl				= sbull_ioctl
+};
+
 static void init_device(struct sbull_dev *dev) {
 	// basic initialization and allocation of the underlying memory
 	memset (dev, 0, sizeof (struct sbull_dev));
@@ -195,28 +275,48 @@ out_vfree:
 }
 
 static int __init sbull_init(void) {
-	int err;
 
-	sbull_major = register_blkdev(sbull_major, "sbd");
+	sbull_major = register_blkdev(sbull_major, "sbull");
 	if (sbull_major <= 0) {
 		printk(KERN_WARNING "sbd: unable to get major num\n");
 		return -EBUSY;
 	}
 
+	// allocate Device array, initialize each one
+	Devices = kmalloc(ndevices * sizeof(struct sbull_dev), GFP_KERNEL);
+	if (Devices == NULL) {
+		goto out_unregister;
+	}
+	int i;
+	for (i = 0; i < ndevices; i++) {
+		init_device(Devices + i; i);
+	}
+
 	return 0;
 
 out_unregister:
-	unregister_blkdev(sbull_major, "sbd");
+	unregister_blkdev(sbull_major, "sbull");
 	return -ENOMEM;
 
 }
 
 static void __exit sbull_exit(void) {
-	del_gendisk(dev->gd);
-	put_disk(dev->gd);
-	unregister_blkdev(sbull_major, "sbd");
-	blk_cleanup_queue(dev->queue);
-	vfree(dev->data);
+	int i;
+	for (i = 0; i < ndevices; i++) {
+		struct sbull_dev *dev = Devices + i;
+
+		if (dev->gd) {
+			del_gendisk(dev->gd);
+			put_disk(dev->gd);
+		}
+		if (dev->queue) {
+			blk_cleanup_queue(dev->queue);
+		}
+		if (dev->data) {
+			vfree(dev->data);
+		}
+		unregister_blkdev(sbull_major, "sbull");
+		kfree(Devices);
 
 }
 
