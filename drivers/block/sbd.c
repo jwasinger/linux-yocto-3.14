@@ -35,7 +35,7 @@ module_param(nsectors, int, 0);
 
 static char *key = "cryptokey";
 static int key_length = 10;
-struct crypto_cipher *cipher; //Crypto cipher struct. Critical for crypto.
+struct crypto_cipher *crypt; //Crypto cipher struct. Critical for crypto.
 
 #define CIPHER_TYPE "aes" //Cipher algorithm to use
 
