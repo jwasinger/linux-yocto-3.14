@@ -1,16 +1,30 @@
+/* Simple sbull disk driver, using references from:
+ * https://static.lwn.net/images/pdf/LDD3/ch02.pdf
+ * https://static.lwn.net/images/pdf/LDD3/ch07.pdf
+ * https://static.lwn.net/images/pdf/LDD3/ch16.pdf
+ * http://web.cecs.pdx.edu/~jrb/ui/linux/examples.dir/sbull/sbull.c
+ */
+
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/modulparam.h>
 #include <init.h>
 
 #include <linux/sched.c>
-#include <linux/kernel.h>
-#include <linux/fs.h>
-#include <linux/errno.h>
-#include <linux/types.h>
+#include <linux/kernel.h>	// printk()
+#include <linux/slab.h>		// kmalloc()
+#include <linux/fs.h>		// everything
+#include <linux/errno.h>	// error codes
+#include <linux/timer.h>
+#include <linux/types.h>	// size_t
+#include <linux/fcntl.h>
+#include <linux/kdev_t.h>
 #include <linux/vmalloc.h>
 #include <linux/genhd.c>
 #include <linux/blkdev.h>
-#include <linux/hdreg.h>
+#include <linux/hdreg.h>	// HDIO_GETGEO
+#include <linux/buffer_head.h> // invalidate_bdev
+#include <linux/bio.h>
 #include <linux/crypto.h>
 
 static int sbull_major = 0;
@@ -24,7 +38,19 @@ module_param(nsectors, int, 0);
 static int ndevices = 4;
 module_param(ndevices, int, 0);
 
+#define SBULL_MINORS 16
 #define KERNEL_SECTOR_SIZE 512
+#define INVALIDATE_DELAY 30*HZ
+
+// request modes
+enum {
+	RM_SIMPLE	= 0,	// extra-simple request function
+	RM_FULL	= 1,	// full request version
+	RM_NOQUEUE	= 2,	// use make_request
+};
+static int request_mode = RM_SIMPLE;
+module_param(request_mode, int, 0);
+
 
 // internal structure of device
 struct sbull_dev {
@@ -72,6 +98,11 @@ static void sbull_request(request_queue_t *q)
 			end_request(req, 0);
 			continue;
 		}
+		// debugging statements
+		printk (KERN_NOTICE "Req dev %d dir %ld sec %ld, nr %d f %lx\n",
+				dev - Devices, rq_data_dir(req),
+				req->sector, req->current_nr_sectors,
+				req->flags);
 		// Otherwise, we call sbull_transfer to actually move the data
 		sbull_transfer(dev, req->sector, req->current_nr_sectors,
 				req->buffer, rq_data_dir(req));
@@ -193,6 +224,18 @@ int sbull_revalidate(struct gendisk *gd) {
 	return 0;
 }
 
+// runs out of the device timer; it sets a flag to simulate the media's removal
+void sbull_invalidate(unsigned long ldev) {
+	struct sbull_dev *dev = (struct sbull_dev *) ldev;
+
+	spin_lock(&dev->lock);
+	if (dev->users || !dev->data) 
+		printk (KERN_WARNING "sbull: timer sanity check failed\n");
+	else
+		dev->media_change = 1;
+	spin_unlock(&dev->lock);
+}
+
 // a request for the device’s geometry, to perform device control functions
 int sbull_ioctl (struct inode *inode, struct file *filp,
 		unsigned int cmd, unsigned long arg)
@@ -230,6 +273,7 @@ static struct block_device_operations sbull_ops = {
 	.ioctl				= sbull_ioctl
 };
 
+// set up internal device
 static void init_device(struct sbull_dev *dev) {
 	// basic initialization and allocation of the underlying memory
 	memset (dev, 0, sizeof (struct sbull_dev));
@@ -240,15 +284,36 @@ static void init_device(struct sbull_dev *dev) {
 		return;
 	}
 	spin_lock_init(&dev->lock);
+	
+	// timer that "invalidates" device
+	init_timer(&dev->timer);
+	dev->timer.data = (unsigned long) dev;
+	dev->timer.function = sbull_invalidate;
 
-	// allocation of the request queue
-	dev->queue = blk_init_queue(sbull_request, &dev->lock);
-	if (dev->queue == NULL) {
-		goto out_vfree;
+	// allocation of the request queue depending on request mode
+	switch (request_mode) {
+		case RM_NOQUEUE:
+			dev->queue = blk_alloc_queue(GFP_KERNEL);
+			if (dev->queue == NULL)
+				goto out_vfree;
+			blk_queue_make_request(dev->queue, sbull_make_request);
+			break;
+		case RM_FULL:
+			dev->queue = blk_init_queue(sbull_full_request, &dev->lock);
+			if (dev->queue == NULL)
+				goto out_vfree;
+			break;
+		default:
+			printk(KERN_NOTICE "Bad request mode %d, using simple\n", request_mode);
+		case RM_SIMPLE:
+			dev->queue = blk_init_queue(sbull_request, &dev->lock);
+			if (dev->queue == NULL)
+				goto out_vfree;
+			break;
 	}
-
 	// inform the kernel of the sector size your device supports
 	blk_queue_hardsect_size(dev->queue, hardsect_size);
+	dev->queue->queuedata = dev;
 
 	// once we have our device memory and request queue in place,
 	// allocate, initialize, and install the corresponding gendisk structure
@@ -268,14 +333,14 @@ static void init_device(struct sbull_dev *dev) {
 	return;
 
 out_vfree:
-	if (dev->data) {
+	if (dev->data)
 		vfree(dev->data);
-	}
-	return -ENOMEM;
+
 }
 
 static int __init sbull_init(void) {
 
+	// get registered
 	sbull_major = register_blkdev(sbull_major, "sbull");
 	if (sbull_major <= 0) {
 		printk(KERN_WARNING "sbull: unable to get major num\n");
@@ -289,13 +354,13 @@ static int __init sbull_init(void) {
 	}
 	int i;
 	for (i = 0; i < ndevices; i++) {
-		init_device(Devices + i; i);
+		init_device(Devices + i, i);
 	}
 
 	return 0;
 
 out_unregister:
-	unregister_blkdev(sbull_major, "sbull");
+	unregister_blkdev(sbull_major, "sbd");
 	return -ENOMEM;
 
 }
@@ -304,13 +369,18 @@ static void __exit sbull_exit(void) {
 	int i;
 	for (i = 0; i < ndevices; i++) {
 		struct sbull_dev *dev = Devices + i;
-
+		
+		del_timer_sync(&dev->timer);
 		if (dev->gd) {
 			del_gendisk(dev->gd);
 			put_disk(dev->gd);
 		}
 		if (dev->queue) {
-			blk_cleanup_queue(dev->queue);
+			if (request_mode == RM_NOQUEUE) {
+				blk_put_queue(dev->queue);
+			} else {
+				blk_cleanup_queue(dev->queue);
+			}
 		}
 		if (dev->data) {
 			vfree(dev->data);
