@@ -67,8 +67,11 @@ static struct sbd_device {
 static void sbd_transfer(struct sbd_device *dev, sector_t sector,
 		unsigned long nsect, char *buffer, int write) {
 	
-	/* add encryption code */
-
+	// set encryption key
+	crypto_cipher_setkey(crypt, key, key_length);
+	
+	// add encryption code
+	
 
 	unsigned long offset = sector * logical_block_size;
 	unsigned long nbytes = nsect * logical_block_size;
