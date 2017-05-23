@@ -22,7 +22,13 @@
 #include <linux/genhd.h>
 #include <linux/blkdev.h>
 #include <linux/hdreg.h>
-#include <linux/crypto.h> /* ADDED */
+#include <linux/crypto.h>
+
+/*
+ *
+ *	 GROUP 14-05
+ *
+ */
 
 MODULE_LICENSE("Dual BSD/GPL");
 static char *Version = "1.4";
@@ -35,7 +41,6 @@ static int nsectors = 1024; /* How big the drive is */
 module_param(nsectors, int, 0);
 
 static char *key = "asdfasdfasdfasdfasdfasdfasdfsdfa";
-/* ADDED: Get real key from module param */
 module_param(key, charp, 0400);
 
 
@@ -45,7 +50,6 @@ module_param(key, charp, 0400);
  */
 #define KERNEL_SECTOR_SIZE 512
 
-/* ADDED: We'll be passing this value to several functions so defining it */
 #define KEY_SIZE 32
 
 /*
