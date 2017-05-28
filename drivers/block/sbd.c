@@ -40,8 +40,11 @@ module_param(logical_block_size, int, 0);
 static int nsectors = 1024; /* How big the drive is */
 module_param(nsectors, int, 0);
 
-static char *key = "asdfasdfasdfasdfasdfasdfasdfsdfa";
-module_param(key, charp, 0400);
+static char *write_key = "asdfasdfasdfasdfasdfasdfasdfsdfa";
+module_param(write_key, charp, 0400);
+
+static char *read_key = "asdfasdfasdfasdfasdfasdfasdfsdfb";
+module_param(read_key , charp, 0400);
 
 
 /*
@@ -66,8 +69,7 @@ static struct sbd_device {
 	u8 *data;
 	struct gendisk *gd;
 
-	/* ADDED: The following is added to sbd for encryption */
-	struct crypto_cipher *blockcipher;
+	struct crypto_cipher *cipher;
 //	struct scatterlist sl[2];
 } Device;
 
@@ -79,7 +81,13 @@ static void sbd_transfer(struct sbd_device *dev, sector_t sector,
 	int i;
 	unsigned long nbytes = nsect * logical_block_size;
 	unsigned long offset = sector * logical_block_size;
+	int len;
 
+	u8 *src;
+	u8 *dst;
+
+	src = buffer;
+	dst = dev->data+offset;
 
 	if ((offset + nbytes) > dev->size) {
 		printk (KERN_NOTICE "offset beyond end of disk\n", offset, nbytes);
@@ -87,14 +95,30 @@ static void sbd_transfer(struct sbd_device *dev, sector_t sector,
 	}
 
 	if (write) {
-		for (i = 0; i < nbytes; i+= crypto_cipher_blocksize(dev->blockcipher)) {
-			crypto_cipher_encrypt_one(dev->blockcipher, dev->data + offset + i, &buffer[i]);
+		printk (KERN_NOTICE "%c", buffer[i]);
+		for (i = 0; i < nbytes; i+= crypto_cipher_blocksize(dev->cipher)) {
+			crypto_cipher_encrypt_one(dev->cipher, dev->data + offset + i, &buffer[i]);
 		}
+		printk(KERN_NOTICE "\n");
 	} else {
-		for (i = 0; i < nbytes; i+= crypto_cipher_blocksize(dev->blockcipher)) {
-			crypto_cipher_decrypt_one(dev->blockcipher, &buffer[i], dev->data + offset + i);
+		for (i = 0; i < nbytes; i+= crypto_cipher_blocksize(dev->cipher)) {
+			crypto_cipher_decrypt_one(dev->cipher, &buffer[i], dev->data + offset + i);
 		}
 	}
+
+    len = nbytes;
+    printk("\n%s:", "decrypted:\n");
+    while (len--) {
+        printk("%x", (unsigned) *dst++);
+	}
+    printk("\n");
+
+	len = nbytes;
+    printk("%s:", "encrypted:\n");
+    while (len--) {
+        printk("%x", (unsigned) *src++);
+	}
+    printk("\n");
 }
 
 static void sbd_request(struct request_queue *q) {
@@ -148,18 +172,33 @@ static int __init sbd_init(void) {
 
 	blk_queue_logical_block_size(Queue, logical_block_size);
 
-	Device.blockcipher = crypto_alloc_cipher(
+	Device.read_cipher = crypto_alloc_cipher(
 		"aes", 0, CRYPTO_ALG_ASYNC);
-	if (IS_ERR(Device.blockcipher)) {
-        printk("block cipher invalid\n");
+	if (IS_ERR(Device.cipher)) {
+        printk("read block cipher invalid\n");
         goto out;
 	}
 
-	err = crypto_cipher_setkey(Device.blockcipher, key, KEY_SIZE);
+	err = crypto_cipher_setkey(Device.cipher, read_key, KEY_SIZE);
 	if (err != 0) {
-        printk("key not set");
+        printk("read key not set");
         goto out;
 	}
+
+	/*
+	Device.write_cipher = crypto_alloc_cipher(
+		"aes", 0, CRYPTO_ALG_ASYNC);
+	if (IS_ERR(Device.write_cipher)) {
+        printk("write block cipher invalid\n");
+        goto out;
+	}
+
+	err = crypto_cipher_setkey(Device.write_cipher, write_key, KEY_SIZE);
+	if (err != 0) {
+        printk("write key not set");
+        goto out;
+	}
+	*/
 
 	major_num = register_blkdev(major_num, "sbd");
 	if (major_num < 0) {
